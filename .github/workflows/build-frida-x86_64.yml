@@ -1,308 +1,96 @@
-name: strongR-frida
-
-on:
-  schedule:
-    - cron: "0 9/12 * * *"
-  workflow_dispatch:
-
-jobs: 
-  check_version:
-    runs-on: ubuntu-22.04
-
-    outputs:
-      FRIDA_VERSION: ${{ steps.pullFridaLatestRelease.outputs.FRIDA_VERSION }}
-      ALREADY_RELEASE: ${{ steps.checkReleaseVersion.outputs.ALREADY_RELEASE }}
+name: Build Frida Android x86_64
+'on':
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      FRIDA_VERSION: 17.24.3
+      FRIDA_CORE_REV: 57161b0ddd2311adf18e84f4680f9cb935ce8376
+      FRIDA_GUM_REV: 3f82ef6a5b2413867835a45fe341913455473303
     steps:
-      - name: Pull Frida Latest Release
-        id: pullFridaLatestRelease
-        uses: actions/github-script@v3.1.0
-        with:
-          github-token: ${{secrets.GITHUB_TOKEN}}
-          script: |
-            const releaseResponse = await github.repos.getLatestRelease({
-              owner: 'frida',
-              repo: 'frida',
-            })
-            const {
-              data: { tag_name: ver }
-            } = releaseResponse;
-            core.setOutput('FRIDA_VERSION', ver);
-      - name: Check release version
-        id: checkReleaseVersion
-        uses: actions/github-script@v3.1.0
-        with:
-          github-token: ${{secrets.GITHUB_TOKEN}}
-          script: |
-            try {
-              const releaseVersion = '${{ steps.pullFridaLatestRelease.outputs.FRIDA_VERSION }}'
-              const releaseResponse = await github.repos.getReleaseByTag({
-                owner: '${{ secrets.GIT_OWNER }}',
-                repo: '${{ secrets.GIT_REPO }}',
-                tag: releaseVersion
-              });
-              const {
-                data: { tag_name: ver }
-              } = releaseResponse;
-              if (ver == '${{ steps.pullFridaLatestRelease.outputs.FRIDA_VERSION }}'){
-                  core.setOutput('ALREADY_RELEASE', '1');
-              }
-              else{
-                  core.setOutput('ALREADY_RELEASE', '0');
-              }
-            } catch (e) {
-              if(e.message == 'Not Found'){
-                core.setOutput('ALREADY_RELEASE', '0');
-              }
-              else{
-                core.setFailed(e.message);
-              }
-            }
-
-
-  create_release:
-    needs: check_version
-    runs-on: ubuntu-22.04
-    if: needs.check_version.outputs.ALREADY_RELEASE == '0'
-
-    steps:
-      - uses: actions/create-release@master
-        id: createRelease
-        name: Create Runner Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: "${{ needs.check_version.outputs.FRIDA_VERSION }}"
-          release_name: "${{ needs.check_version.outputs.FRIDA_VERSION }}"
-          prerelease: false
-
-  android_build:
-    runs-on: ubuntu-22.04
-    needs: [check_version, create_release]
-
-    steps:
-    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
     - uses: actions/setup-node@v4
       with:
-        node-version: 18
-
-    - uses: fusion-engineering/setup-git-credentials@v2
+        node-version: '22'
+    - uses: actions/setup-java@v4
       with:
-        credentials: ${{secrets.GIT_CREDENTIALS}}
-
-    - name: set up JDK 17
-      uses: actions/setup-java@v3
+        distribution: temurin
+        java-version: '17'
+    - name: Set up Android NDK
+      id: ndk
+      uses: nttld/setup-ndk@v1
       with:
-        distribution: "temurin"
-        java-version: "17"
-
-    - name: Setup Android NDK
-      id: setup-ndk
-      uses: nttld/setup-ndk@v1.0.6
-      with:
-        ndk-version: r25b
-    
-    - name: Set up Python 3.9
-      uses: actions/setup-python@v5.1.0
-      with:
-        python-version: '3.9'
-
-    - name: install dependencies
-      run: |
-        sudo apt-get update && DEBIAN_FRONTEND=noninteractive sudo apt-get install build-essential tree ninja-build gcc-multilib g++-multilib lib32stdc++-9-dev flex bison ruby ruby-dev python3-requests python3-setuptools python3-dev python3-pip libc6-dev libc6-dev-i386 -y
-        sudo gem install fpm -v 1.11.0 --no-document
-        python3 -m pip install lief graphlib
-
-    - name: build frida for Android
+        ndk-version: r29
+        local-cache: 'false'
+    - name: Install build dependencies
       shell: bash
       run: |
-        git config --global user.name "${{ secrets.GIT_NAME }}"
-        git config --global user.email "${{ secrets.GIT_EMAIL }}"
-        git clone ${{ secrets.PATCH_REPO }}
-        export ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}
-        git clone --recurse-submodules https://github.com/frida/frida
-        cd frida
-        for path in ../Patchs/strongR-frida/*
-        do
-          name=$(basename $path)
-          real=$(realpath $path)
-          echo "Apply patches in $real to frida/subprojects/$name"
-          cd subprojects/$name
-          git am ../../../Patchs/strongR-frida/$name/*.patch
-          cd ../..
-          echo $i
-        done
-        cd ..
-        
-        ARCHES="android-arm android-arm64 android-x86 android-x86_64"
-        for ARCH in $ARCHES
-        do
-          mkdir build-$ARCH
-          cd build-$ARCH
-          ../frida/configure --host=$ARCH
-          make
-          cd ..
-        done
-        
-
-    - name: Check release version
-      id: checkReleaseVersion
-      uses: actions/github-script@v3.1.0
-      with:
-        github-token: ${{secrets.GITHUB_TOKEN}}
-        script: |
-          try {
-            const releaseVersion = '${{ needs.check_version.outputs.FRIDA_VERSION }}'
-            const releaseResponse = await github.repos.getReleaseByTag({
-              owner: '${{ secrets.GIT_OWNER }}',
-              repo: '${{ secrets.GIT_REPO }}',
-              tag: releaseVersion
-            })
-            const {
-              data: { id: releaseId, html_url: htmlUrl, upload_url: uploadUrl }
-            } = releaseResponse;
-            core.setOutput('id', releaseId);
-            core.setOutput('html_url', htmlUrl);
-            core.setOutput('upload_url', uploadUrl);
-            core.setOutput('version', releaseVersion);
-          } catch (e) {
-            core.setFailed(e.message);
-          }
-    - name: package build result for Android
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y build-essential git ninja-build pkg-config flex bison gcc-multilib g++-multilib xz-utils unzip file
+        python -m pip install lief graphlib setuptools packaging
+    - name: Fetch pinned Frida source
       shell: bash
       run: |
-        
-        gzip build-android-arm/subprojects/frida-core/server/frida-server
-        gzip build-android-arm64/subprojects/frida-core/server/frida-server
-        gzip build-android-x86/subprojects/frida-core/server/frida-server
-        gzip build-android-x86_64/subprojects/frida-core/server/frida-server
-        
-        gzip build-android-arm/subprojects/frida-core/inject/frida-inject
-        gzip build-android-arm64/subprojects/frida-core/inject/frida-inject
-        gzip build-android-x86/subprojects/frida-core/inject/frida-inject
-        gzip build-android-x86_64/subprojects/frida-core/inject/frida-inject
-        
-        gzip build-android-arm/subprojects/frida-core/lib/gadget/frida-gadget.so
-        gzip build-android-arm64/subprojects/frida-core/lib/gadget/frida-gadget.so
-        gzip build-android-x86/subprojects/frida-core/lib/gadget/frida-gadget.so
-        gzip build-android-x86_64/subprojects/frida-core/lib/gadget/frida-gadget.so
-        
-        
-    - name: Upload android arm frida-server for strongR-frida
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
-        asset_path: '${{ github.workspace }}/build-android-arm/subprojects/frida-core/server/frida-server.gz'
-        asset_name: 'hluda-server-${{ needs.check_version.outputs.FRIDA_VERSION }}-android-arm.gz'
-        asset_content_type: application/octet-stream
+        set -euo pipefail
+        git clone --branch "$FRIDA_VERSION" --depth 1 --recurse-submodules --shallow-submodules https://github.com/frida/frida.git frida-source
+        git -C frida-source describe --tags --exact-match
+        test "$(git -C frida-source/subprojects/frida-core rev-parse HEAD)" = "$FRIDA_CORE_REV"
+        test "$(git -C frida-source/subprojects/frida-gum rev-parse HEAD)" = "$FRIDA_GUM_REV"
+        test "$(git -C frida-source/subprojects/frida-core rev-parse HEAD)" = "$FRIDA_CORE_REV"
+        test "$(git -C frida-source/subprojects/frida-gum rev-parse HEAD)" = "$FRIDA_GUM_REV"
+    - name: Apply patches ported to Frida 17.24.3
+      shell: bash
+      run: |
+        python - <<'PY'
+        from pathlib import Path
+        import base64
+        import json
+        import os
+        import subprocess
 
-    - name: Upload android arm64 frida-server for hluda
-      uses: actions/upload-release-asset@v1.0.2
+        for module, encoded in json.loads(os.environ["PORT_PATCHES"]).items():
+            target = Path("frida-source/subprojects") / module
+            patch = Path(os.environ["RUNNER_TEMP"]) / (module + "-17.24.3.patch")
+            patch.write_bytes(base64.b64decode(encoded, validate=True))
+            subprocess.run(["git", "-C", str(target), "apply", "--check", str(patch)], check=True)
+            subprocess.run(["git", "-C", str(target), "apply", str(patch)], check=True)
+            print(f"Applied {module} patches for 17.24.3", flush=True)
+        PY
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
-        asset_path: '${{ github.workspace }}/build-android-arm64/subprojects/frida-core/server/frida-server.gz'
-        asset_name: 'hluda-server-${{ needs.check_version.outputs.FRIDA_VERSION }}-android-arm64.gz'
-        asset_content_type: application/octet-stream
-
-    - name: Upload android x86 frida-server for hluda
-      uses: actions/upload-release-asset@v1.0.2
+        PORT_PATCHES: '{"frida-core":"LS0tIGEvbGliL2Jhc2UvcnBjLnZhbGEKKysrIGIvbGliL2Jhc2UvcnBjLnZhbGEKQEAgLTIyLDYgKzIyLDExIEBACiAJCQlPYmplY3QgKHBlZXI6IHBlZXIpOwogCQl9CiAKKwkJcHJpdmF0ZSBzdHJpbmcgZ2V0X3JwY19tYXJrZXIgKGJvb2wgcXVvdGVkKSB7CisJCQlzdHJpbmcgdmFsdWUgPSAoc3RyaW5nKSBCYXNlNjQuZGVjb2RlICgoc3RyaW5nKSBCYXNlNjQuZGVjb2RlICgiV201S2NGcEhSVFpqYmtKcSIpKTsKKwkJCXJldHVybiBxdW90ZWQgPyAiXCIiICsgdmFsdWUgKyAiXCIiIDogdmFsdWU7CisJCX0KKwogCQkvKioKIAkJICogQ2FsbHMgYSByZW1vdGUgbWV0aG9kIGFuZCB3YWl0cyBmb3IgaXRzIHJlc3VsdC4KIAkJICoKQEAgLTM2LDcgKzQxLDcgQEAKIAkJCXZhciByZXF1ZXN0ID0gbmV3IEpzb24uQnVpbGRlciAoKTsKIAkJCXJlcXVlc3QKIAkJCQkuYmVnaW5fYXJyYXkgKCkKLQkJCQkuYWRkX3N0cmluZ192YWx1ZSAoImZyaWRhOnJwYyIpCisJCQkJLmFkZF9zdHJpbmdfdmFsdWUgKGdldF9ycGNfbWFya2VyIChmYWxzZSkpCiAJCQkJLmFkZF9zdHJpbmdfdmFsdWUgKHJlcXVlc3RfaWQpCiAJCQkJLmFkZF9zdHJpbmdfdmFsdWUgKCJjYWxsIikKIAkJCQkuYWRkX3N0cmluZ192YWx1ZSAobWV0aG9kKQpAQCAtOTYsNyArMTAxLDcgQEAKIAkJICogQHJldHVybiB0cnVlIGlmIHRoZSBtZXNzYWdlIHdhcyBhbiBSUEMgbWVzc2FnZSBhbmQgd2FzIGhhbmRsZWQKIAkJICovCiAJCXB1YmxpYyBib29sIHRyeV9oYW5kbGVfbWVzc2FnZSAoc3RyaW5nIGpzb24pIHsKLQkJCWlmIChqc29uLmluZGV4X29mICgiXCJmcmlkYTpycGNcIiIpID09IC0xKQorCQkJaWYgKGpzb24uaW5kZXhfb2YgKGdldF9ycGNfbWFya2VyICh0cnVlKSkgPT0gLTEpCiAJCQkJcmV0dXJuIGZhbHNlOwogCiAJCQl2YXIgcGFyc2VyID0gbmV3IEpzb24uUGFyc2VyICgpOwpAQCAtMTI1LDcgKzEzMCw3IEBACiAJCQkJcmV0dXJuIGZhbHNlOwogCiAJCQlzdHJpbmc/IHR5cGUgPSBycGNfbWVzc2FnZS5nZXRfZWxlbWVudCAoMCkuZ2V0X3N0cmluZyAoKTsKLQkJCWlmICh0eXBlID09IG51bGwgfHwgdHlwZSAhPSAiZnJpZGE6cnBjIikKKwkJCWlmICh0eXBlID09IG51bGwgfHwgdHlwZSAhPSBnZXRfcnBjX21hcmtlciAoZmFsc2UpKQogCQkJCXJldHVybiBmYWxzZTsKIAogCQkJdmFyIHJlcXVlc3RfaWRfdmFsdWUgPSBycGNfbWVzc2FnZS5nZXRfZWxlbWVudCAoMSk7Ci0tLSBhL3NyYy9saW51eC9saW51eC1ob3N0LXNlc3Npb24udmFsYQorKysgYi9zcmMvbGludXgvbGludXgtaG9zdC1zZXNzaW9uLnZhbGEKQEAgLTMxLDYgKzMxLDcgQEAKIAkJcHJpdmF0ZSBBZ2VudENvbnRhaW5lciBzeXN0ZW1fc2Vzc2lvbl9jb250YWluZXI7CiAKIAkJcHJpdmF0ZSBBZ2VudERlc2NyaXB0b3I/IGFnZW50OworCQlwcml2YXRlIHN0cmluZyBhZ2VudF9iYXNlbmFtZSA9IFV1aWQuc3RyaW5nX3JhbmRvbSAoKTsKIAogI2lmIEFORFJPSUQKIAkJcHJpdmF0ZSBQcm9taXNlPEFuZHJvaWRIZWxwZXJDbGllbnQ+PyBhbmRyb2lkX2hlbHBlcl9yZXF1ZXN0OwpAQCAtNjQsMTIgKzY1LDEyIEBACiAJCQl2YXIgYmxvYjY0ID0gRnJpZGEuRGF0YS5BZ2VudC5nZXRfZnJpZGFfYWdlbnRfNjRfc29fYmxvYiAoKTsKIAkJCXZhciBlbXVsYXRlZF9hcm0gPSBGcmlkYS5EYXRhLkFnZW50LmdldF9mcmlkYV9hZ2VudF9hcm1fc29fYmxvYiAoKTsKIAkJCXZhciBlbXVsYXRlZF9hcm02NCA9IEZyaWRhLkRhdGEuQWdlbnQuZ2V0X2ZyaWRhX2FnZW50X2FybTY0X3NvX2Jsb2IgKCk7Ci0JCQlhZ2VudCA9IG5ldyBBZ2VudERlc2NyaXB0b3IgKFBhdGhUZW1wbGF0ZSAoImZyaWRhLWFnZW50LTxhcmNoPi5zbyIpLAorCQkJYWdlbnQgPSBuZXcgQWdlbnREZXNjcmlwdG9yIChQYXRoVGVtcGxhdGUgKGFnZW50X2Jhc2VuYW1lICsgIi08YXJjaD4uc28iKSwKIAkJCQluZXcgQnl0ZXMuc3RhdGljIChibG9iMzIuZGF0YSksCiAJCQkJbmV3IEJ5dGVzLnN0YXRpYyAoYmxvYjY0LmRhdGEpLAogCQkJCW5ldyBBZ2VudFJlc291cmNlW10gewotCQkJCQluZXcgQWdlbnRSZXNvdXJjZSAoImZyaWRhLWFnZW50LWFybS5zbyIsIG5ldyBCeXRlcy5zdGF0aWMgKGVtdWxhdGVkX2FybS5kYXRhKSwgdGVtcGRpciksCi0JCQkJCW5ldyBBZ2VudFJlc291cmNlICgiZnJpZGEtYWdlbnQtYXJtNjQuc28iLCBuZXcgQnl0ZXMuc3RhdGljIChlbXVsYXRlZF9hcm02NC5kYXRhKSwgdGVtcGRpciksCisJCQkJCW5ldyBBZ2VudFJlc291cmNlIChhZ2VudF9iYXNlbmFtZSArICItYXJtLnNvIiwgbmV3IEJ5dGVzLnN0YXRpYyAoZW11bGF0ZWRfYXJtLmRhdGEpLCB0ZW1wZGlyKSwKKwkJCQkJbmV3IEFnZW50UmVzb3VyY2UgKGFnZW50X2Jhc2VuYW1lICsgIi1hcm02NC5zbyIsIG5ldyBCeXRlcy5zdGF0aWMgKGVtdWxhdGVkX2FybTY0LmRhdGEpLCB0ZW1wZGlyKSwKIAkJCQl9LAogCQkJCUFnZW50TW9kZS5JTlNUQU5DRUQsCiAJCQkJdGVtcGRpcik7CkBAIC00MDUsNyArNDA2LDcgQEAKIAkJcHJvdGVjdGVkIG92ZXJyaWRlIGFzeW5jIEZ1dHVyZTxJT1N0cmVhbT4gcGVyZm9ybV9hdHRhY2hfdG8gKHVpbnQgcGlkLCBIYXNoVGFibGU8c3RyaW5nLCBWYXJpYW50PiBvcHRpb25zLAogCQkJCUNhbmNlbGxhYmxlPyBjYW5jZWxsYWJsZSwgb3V0IE9iamVjdD8gdHJhbnNwb3J0KSB0aHJvd3MgRXJyb3IsIElPRXJyb3IgewogCQkJdWludCBpZDsKLQkJCXN0cmluZyBlbnRyeXBvaW50ID0gImZyaWRhX2FnZW50X21haW4iOworCQkJc3RyaW5nIGVudHJ5cG9pbnQgPSAibWFpbiI7CiAJCQlzdHJpbmcgcGFyYW1ldGVycyA9IG1ha2VfYWdlbnRfcGFyYW1ldGVycyAocGlkLCAiIiwgb3B0aW9ucyk7CiAJCQlBZ2VudEZlYXR1cmVzIGZlYXR1cmVzID0gQ09OVFJPTF9DSEFOTkVMOwogCQkJdmFyIGxpbmplY3RvciA9IChMaW5qZWN0b3IpIGluamVjdG9yOwpAQCAtNDI3LDEzICs0MjgsMTMgQEAKIAkJfQogCiAJCXByb3RlY3RlZCBvdmVycmlkZSBzdHJpbmc/IGdldF9lbXVsYXRlZF9hZ2VudF9wYXRoICh1aW50IHBpZCkgdGhyb3dzIEVycm9yIHsKLQkJCXVub3duZWQgc3RyaW5nIG5hbWU7CisJCQlzdHJpbmcgbmFtZTsKIAkJCXN3aXRjaCAoY3B1X3R5cGVfZnJvbV9waWQgKHBpZCkpIHsKIAkJCQljYXNlIEd1bS5DcHVUeXBlLklBMzI6Ci0JCQkJCW5hbWUgPSAiZnJpZGEtYWdlbnQtYXJtLnNvIjsKKwkJCQkJbmFtZSA9IGFnZW50X2Jhc2VuYW1lICsgIi1hcm0uc28iOwogCQkJCQlicmVhazsKIAkJCQljYXNlIEd1bS5DcHVUeXBlLkFNRDY0OgotCQkJCQluYW1lID0gImZyaWRhLWFnZW50LWFybTY0LnNvIjsKKwkJCQkJbmFtZSA9IGFnZW50X2Jhc2VuYW1lICsgIi1hcm02NC5zbyI7CiAJCQkJCWJyZWFrOwogCQkJCWRlZmF1bHQ6CiAJCQkJCXRocm93IG5ldyBFcnJvci5OT1RfU1VQUE9SVEVEICgiRW11bGF0ZWQgcmVhbG0gaXMgbm90IHN1cHBvcnRlZCBvbiB0aGlzIGFyY2hpdGVjdHVyZSIpOwotLS0gYS9zcmMvYWdlbnQtY29udGFpbmVyLnZhbGEKKysrIGIvc3JjL2FnZW50LWNvbnRhaW5lci52YWxhCkBAIC0yOCw3ICsyOCw3IEBACiAJCQl9CiAKIAkJCXZvaWQgKiBtYWluX2Z1bmNfc3ltYm9sOwotCQkJdmFyIG1haW5fZnVuY19mb3VuZCA9IGNvbnRhaW5lci5tb2R1bGUuc3ltYm9sICgiZnJpZGFfYWdlbnRfbWFpbiIsIG91dCBtYWluX2Z1bmNfc3ltYm9sKTsKKwkJCXZhciBtYWluX2Z1bmNfZm91bmQgPSBjb250YWluZXIubW9kdWxlLnN5bWJvbCAoIm1haW4iLCBvdXQgbWFpbl9mdW5jX3N5bWJvbCk7CiAJCQlhc3NlcnQgKG1haW5fZnVuY19mb3VuZCk7CiAJCQljb250YWluZXIubWFpbl9pbXBsID0gKEFnZW50TWFpbkZ1bmMpIG1haW5fZnVuY19zeW1ib2w7CiAKLS0tIGEvc3JjL2VtYmVkLWFnZW50LnB5CisrKyBiL3NyYy9lbWJlZC1hZ2VudC5weQpAQCAtNzYsNiArNzYsMTEgQEAKICAgICAgICAgICAgIGVtYmVkZGVkX2FnZW50ID0gcHJpdl9kaXIgLyBmImZyaWRhLWFnZW50LXtmbGF2b3J9LnNvIgogICAgICAgICAgICAgaWYgYWdlbnQgaXMgbm90IE5vbmU6CiAgICAgICAgICAgICAgICAgc2h1dGlsLmNvcHkoYWdlbnQsIGVtYmVkZGVkX2FnZW50KQorICAgICAgICAgICAgICAgIHN1YnByb2Nlc3MucnVuKFsKKyAgICAgICAgICAgICAgICAgICAgc3lzLmV4ZWN1dGFibGUsCisgICAgICAgICAgICAgICAgICAgIHN0cihQYXRoKF9fZmlsZV9fKS5yZXNvbHZlKCkud2l0aF9uYW1lKCJhbnRpLWFudGktZnJpZGEucHkiKSksCisgICAgICAgICAgICAgICAgICAgIHN0cihlbWJlZGRlZF9hZ2VudCksCisgICAgICAgICAgICAgICAgXSwgY2hlY2s9VHJ1ZSkKICAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICAgZW1iZWRkZWRfYWdlbnQud3JpdGVfYnl0ZXMoYiIiKQogICAgICAgICAgICAgZW1iZWRkZWRfYXNzZXRzICs9IFtlbWJlZGRlZF9hZ2VudF0KLS0tIC9kZXYvbnVsbAorKysgYi9zcmMvYW50aS1hbnRpLWZyaWRhLnB5CkBAIC0wLDAgKzEsNTkgQEAKKyMgQWRhcHRlZCBmcm9tIFlsYXJvZC9GbG9yaWRhJ3MgcHVibGljIHBhdGNoZXMsIHBpbm5lZCBhdAorIyA2ZDRiMmU4OGViZTJiYWNlMTIzMjJkYjkzNDcwYjBlNjhkNDI0MGM5IChHUEwtMy4wKS4KKyMgUG9ydCBjaGFuZ2VzOiBubyBzaGVsbCBzdHJpbmcgc3Vic3RpdHV0aW9uOyB2YWxpZGF0ZSBFTEYgZW50cnlwb2ludDsKKyMgdXNlIHNlY3Rpb24gdmlydHVhbCBhZGRyZXNzZXMgZm9yIExJRUYgcGF0Y2hlcywgbm90IGZpbGUgb2Zmc2V0cy4KK2Zyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoraW1wb3J0IHNlY3JldHMKK2ltcG9ydCBzdHJpbmcKK2ltcG9ydCBzeXMKKworaW1wb3J0IGxpZWYKKworCitkZWYgdG9rZW4obGVuZ3RoKToKKyAgICByZXR1cm4gJycuam9pbihzZWNyZXRzLmNob2ljZShzdHJpbmcuYXNjaWlfbGV0dGVycykgZm9yIF8gaW4gcmFuZ2UobGVuZ3RoKSkKKworCitkZWYgbWFpbihmaWxlbmFtZSk6CisgICAgcGF0aCA9IFBhdGgoZmlsZW5hbWUpCisgICAgYmluYXJ5ID0gbGllZi5wYXJzZShzdHIocGF0aCkpCisgICAgaWYgbm90IGlzaW5zdGFuY2UoYmluYXJ5LCBsaWVmLkVMRi5CaW5hcnkpOgorICAgICAgICByYWlzZSBSdW50aW1lRXJyb3IoZidFeHBlY3RlZCBhbiBFTEYgYWdlbnQ6IHtwYXRofScpCisgICAgaWYgbm90IGFueShzLm5hbWUgPT0gJ2ZyaWRhX2FnZW50X21haW4nIGZvciBzIGluIGJpbmFyeS5keW5hbWljX3N5bWJvbHMpOgorICAgICAgICByYWlzZSBSdW50aW1lRXJyb3IoZidNaXNzaW5nIGV4cG9ydGVkIGZyaWRhX2FnZW50X21haW46IHtwYXRofScpCisKKyAgICByZXBsYWNlbWVudCA9IHRva2VuKDUpCisgICAgZm9yIHN5bWJvbCBpbiBiaW5hcnkuc3ltYm9sczoKKyAgICAgICAgaWYgc3ltYm9sLm5hbWUgPT0gJ2ZyaWRhX2FnZW50X21haW4nOgorICAgICAgICAgICAgc3ltYm9sLm5hbWUgPSAnbWFpbicKKyAgICAgICAgZWxzZToKKyAgICAgICAgICAgIHN5bWJvbC5uYW1lID0gc3ltYm9sLm5hbWUucmVwbGFjZSgnZnJpZGEnLCByZXBsYWNlbWVudCkucmVwbGFjZSgnRlJJREEnLCByZXBsYWNlbWVudCkKKworICAgIG1hcmtlcnMgPSAoJ0ZyaWRhU2NyaXB0RW5naW5lJywgJ0dMaWItR0lPJywgJ0dEQnVzUHJveHknLCAnR3VtU2NyaXB0JykKKyAgICBmb3Igc2VjdGlvbiBpbiBiaW5hcnkuc2VjdGlvbnM6CisgICAgICAgIGlmIHNlY3Rpb24ubmFtZSAhPSAnLnJvZGF0YSc6CisgICAgICAgICAgICBjb250aW51ZQorICAgICAgICBjb250ZW50ID0gYnl0ZXMoc2VjdGlvbi5jb250ZW50KQorICAgICAgICBmb3IgbWFya2VyIGluIG1hcmtlcnM6CisgICAgICAgICAgICBuZWVkbGUgPSBtYXJrZXIuZW5jb2RlKCdhc2NpaScpCisgICAgICAgICAgICBvZmZzZXQgPSBjb250ZW50LmZpbmQobmVlZGxlKQorICAgICAgICAgICAgd2hpbGUgb2Zmc2V0ICE9IC0xOgorICAgICAgICAgICAgICAgIGJpbmFyeS5wYXRjaF9hZGRyZXNzKHNlY3Rpb24udmlydHVhbF9hZGRyZXNzICsgb2Zmc2V0LCBsaXN0KG5lZWRsZVs6Oi0xXSkpCisgICAgICAgICAgICAgICAgb2Zmc2V0ID0gY29udGVudC5maW5kKG5lZWRsZSwgb2Zmc2V0ICsgbGVuKG5lZWRsZSkpCisgICAgYmluYXJ5LndyaXRlKHN0cihwYXRoKSkKKworICAgIGNvbnRlbnQgPSBwYXRoLnJlYWRfYnl0ZXMoKQorICAgIGZvciBtYXJrZXIgaW4gKGInZ3VtLWpzLWxvb3AnLCBiJ2dtYWluJywgYidnZGJ1cycpOgorICAgICAgICBjb250ZW50ID0gY29udGVudC5yZXBsYWNlKG1hcmtlciwgdG9rZW4obGVuKG1hcmtlcikpLmVuY29kZSgnYXNjaWknKSkKKyAgICBwYXRoLndyaXRlX2J5dGVzKGNvbnRlbnQpCisKKyAgICByZXN1bHQgPSBsaWVmLnBhcnNlKHN0cihwYXRoKSkKKyAgICBpZiBub3QgaXNpbnN0YW5jZShyZXN1bHQsIGxpZWYuRUxGLkJpbmFyeSk6CisgICAgICAgIHJhaXNlIFJ1bnRpbWVFcnJvcihmJ1BhdGNoZWQgYWdlbnQgaXMgbm90IEVMRjoge3BhdGh9JykKKyAgICBpZiBub3QgYW55KHMubmFtZSA9PSAnbWFpbicgZm9yIHMgaW4gcmVzdWx0LmR5bmFtaWNfc3ltYm9scyk6CisgICAgICAgIHJhaXNlIFJ1bnRpbWVFcnJvcihmJ1BhdGNoZWQgYWdlbnQgZG9lcyBub3QgZXhwb3J0IG1haW46IHtwYXRofScpCisgICAgcHJpbnQoZidQcm9jZXNzZWQgZW1iZWRkZWQgYWdlbnQ6IHtwYXRoLm5hbWV9JywgZmx1c2g9VHJ1ZSkKKworCitpZiBfX25hbWVfXyA9PSAnX19tYWluX18nOgorICAgIG1haW4oc3lzLmFyZ3ZbMV0pCi0tLSBhL3NyYy9mcmlkYS1nbHVlLmMKKysrIGIvc3JjL2ZyaWRhLWdsdWUuYwpAQCAtNTUsNiArNTUsOCBAQAogI2VsaWYgZGVmaW5lZCAoSEFWRV9HSU9PUEVOU1NMKQogICAgIGdfaW9fbW9kdWxlX29wZW5zc2xfcmVnaXN0ZXIgKCk7CiAjZW5kaWYKKworICAgIGdfc2V0X3ByZ25hbWUgKCJnZ2JvbmQiKTsKIAogICAgIGlmIChydW50aW1lID09IEZSSURBX1JVTlRJTUVfT1RIRVIpCiAgICAgewotLS0gYS9saWIvYmFzZS9saW51eC52YWxhCisrKyBiL2xpYi9iYXNlL2xpbnV4LnZhbGEKQEAgLTEyNCw3ICsxMjQsNyBAQAogCQl9CiAKIAkJcHJpdmF0ZSBpbnQgbWVtZmRfY3JlYXRlIChzdHJpbmcgbmFtZSwgdWludCBmbGFncykgewotCQkJcmV0dXJuIExpbnV4LnN5c2NhbGwgKExpbnV4U3lzY2FsbC5NRU1GRF9DUkVBVEUsIG5hbWUsIGZsYWdzKTsKKwkJCXJldHVybiBMaW51eC5zeXNjYWxsIChMaW51eFN5c2NhbGwuTUVNRkRfQ1JFQVRFLCAiaml0LWNhY2hlIiwgZmxhZ3MpOwogCQl9CiAJfQogCg==","frida-gum":"LS0tIGEvZ3VtL2d1bS5jCisrKyBiL2d1bS9ndW0uYwpAQCAtMzEwLDcgKzMxMCw3IEBACiAgIGdfbG9nX3NldF9kZWZhdWx0X2hhbmRsZXIgKGd1bV9vbl9sb2dfbWVzc2FnZSwgTlVMTCk7CiAgIGd1bV9kb19pbml0ICgpOwogCi0gIGdfc2V0X3ByZ25hbWUgKCJmcmlkYSIpOworICBnX3NldF9wcmduYW1lICgiZ2dib25kIik7CiAKICNpZiBkZWZpbmVkIChIQVZFX0xJTlVYKSAmJiBkZWZpbmVkIChIQVZFX0dMSUJDKQogICBndW1fbGliZGxfcHJldmVudF91bmxvYWQgKCk7Cg=="}'
+    - name: Configure and build Android x86_64
+      shell: bash
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+      run: |
+        set -euo pipefail
+        mkdir build-android-x86_64
+        cd build-android-x86_64
+        ../frida-source/configure --host=android-x86_64
+        make -j2
+    - name: Package server
+      shell: bash
+      run: |
+        set -euo pipefail
+        server=build-android-x86_64/subprojects/frida-core/server/frida-server
+        test -f "$server"
+        file "$server"
+        mkdir dist
+        output="frida-server-$FRIDA_VERSION-ported-patches-android-x86_64.gz"
+        gzip -c "$server" > "dist/$output"
+        cd dist
+        sha256sum "$output" > "$output.sha256"
+    - name: Upload compiled server
+      uses: actions/upload-artifact@v4
       with:
-        upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
-        asset_path: '${{ github.workspace }}/build-android-x86/subprojects/frida-core/server/frida-server.gz'
-        asset_name: 'hluda-server-${{ needs.check_version.outputs.FRIDA_VERSION }}-android-x86.gz'
-        asset_content_type: application/octet-stream
-
-    - name: Upload android x86_64 frida-server for hluda
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
-        asset_path: '${{ github.workspace }}/build-android-x86_64/subprojects/frida-core/server/frida-server.gz'
-        asset_name: 'hluda-server-${{ needs.check_version.outputs.FRIDA_VERSION }}-android-x86_64.gz'
-        asset_content_type: application/octet-stream
-        
-    - name: Upload android arm frida-inject for hluda
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
-        asset_path: '${{ github.workspace }}/build-android-arm/subprojects/frida-core/inject/frida-inject.gz'
-        asset_name: 'hluda-inject-${{ needs.check_version.outputs.FRIDA_VERSION }}-android-arm.gz'
-        asset_content_type: application/octet-stream
-        
-    - name: Upload android arm64 frida-inject for hluda
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
-        asset_path: '${{ github.workspace }}/build-android-arm64/subprojects/frida-core/inject/frida-inject.gz'
-        asset_name: 'hluda-inject-${{ needs.check_version.outputs.FRIDA_VERSION }}-android-arm64.gz'
-        asset_content_type: application/octet-stream
-        
-    - name: Upload android x86 frida-inject for hluda
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
-        asset_path: '${{ github.workspace }}/build-android-x86/subprojects/frida-core/inject/frida-inject.gz'
-        asset_name: 'hluda-inject-${{ needs.check_version.outputs.FRIDA_VERSION }}-android-x86.gz'
-        asset_content_type: application/octet-stream
-        
-    - name: Upload android x86_64 frida-inject for hluda
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
-        asset_path: '${{ github.workspace }}/build-android-x86_64/subprojects/frida-core/inject/frida-inject.gz'
-        asset_name: 'hluda-inject-${{ needs.check_version.outputs.FRIDA_VERSION }}-android-arm-x86_64.gz'
-        asset_content_type: application/octet-stream
-    
-    - name: Upload android arm frida-gadget for hluda
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
-        asset_path: '${{ github.workspace }}/build-android-arm/subprojects/frida-core/lib/gadget/frida-gadget.so.gz'
-        asset_name: 'hluda-gadget-${{ needs.check_version.outputs.FRIDA_VERSION }}-android-arm.so.gz'
-        asset_content_type: application/octet-stream
-
-    - name: Upload android arm64 frida-gadget for hluda
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
-        asset_path: '${{ github.workspace }}/build-android-arm64/subprojects/frida-core/lib/gadget/frida-gadget.so.gz'
-        asset_name: 'hluda-gadget-${{ needs.check_version.outputs.FRIDA_VERSION }}-android-arm64.so.gz'
-        asset_content_type: application/octet-stream
-   
-    - name: Upload android x86 frida-gadget for hluda
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
-        asset_path: '${{ github.workspace }}/build-android-x86/subprojects/frida-core/lib/gadget/frida-gadget.so.gz'
-        asset_name: 'hluda-gadget-${{ needs.check_version.outputs.FRIDA_VERSION }}-android-x86.so.gz'
-        asset_content_type: application/octet-stream
-
-    - name: Upload android x86_64 frida-gadget for hluda
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: '${{ steps.checkReleaseVersion.outputs.upload_url }}'
-        asset_path: '${{ github.workspace }}/build-android-x86_64/subprojects/frida-core/lib/gadget/frida-gadget.so.gz'
-        asset_name: 'hluda-gadget-${{ needs.check_version.outputs.FRIDA_VERSION }}-android-x86_64.so.gz'
-        asset_content_type: application/octet-stream
+        name: frida-server-17.24.3-ported-patches-android-x86_64
+        path: dist/*
+        if-no-files-found: error
+        retention-days: '14'
