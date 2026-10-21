@@ -1,0 +1,114 @@
+name: Build Frida Android x86_64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      FRIDA_VERSION: "17.24.3"
+      PATCH_REF: "6d4b2e88ebe2bace12322db93470b0e68d4240c9"
+    steps:
+      - name: Check out public Florida patches
+        uses: actions/checkout@v4
+        with:
+          repository: Ylarod/Florida
+          ref: ${{ env.PATCH_REF }}
+          path: patch-source
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
+          local-cache: false
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential git ninja-build pkg-config flex bison gcc-multilib g++-multilib xz-utils unzip file
+          python -m pip install lief graphlib setuptools packaging
+
+      - name: Fetch pinned Frida source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --branch "$FRIDA_VERSION" --depth 1 --recurse-submodules --shallow-submodules https://github.com/frida/frida.git frida-source
+          git -C frida-source describe --tags --exact-match
+
+      - name: Apply public patches (stop if incompatible)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          patch_root="$GITHUB_WORKSPACE/patch-source/patches"
+          applied=0
+          for module_dir in "$patch_root"/*; do
+            test -d "$module_dir" || continue
+            module_name="$(basename "$module_dir")"
+            target="$GITHUB_WORKSPACE/frida-source/subprojects/$module_name"
+            test -d "$target"
+            patches=("$module_dir"/*.patch)
+            for patch in "${patches[@]}"; do
+              echo "Applying $module_name/$(basename "$patch")"
+              if ! git -C "$target" -c user.name="Local build" -c user.email="build@example.invalid" am "$patch"; then
+                echo "::error::Patch does not apply to Frida $FRIDA_VERSION: $module_name/$(basename "$patch"). See the git am error above."
+                exit 1
+              fi
+              applied=$((applied + 1))
+            done
+          done
+          test "$applied" -gt 0
+
+      - name: Configure and build Android x86_64
+        shell: bash
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          mkdir build-android-x86_64
+          cd build-android-x86_64
+          ../frida-source/configure --host=android-x86_64
+          make -j2
+
+      - name: Package server
+        shell: bash
+        run: |
+          set -euo pipefail
+          server=build-android-x86_64/subprojects/frida-core/server/frida-server
+          test -f "$server"
+          file "$server"
+          mkdir dist
+          output="frida-server-$FRIDA_VERSION-public-patches-android-x86_64.gz"
+          gzip -c "$server" > "dist/$output"
+          cd dist
+          sha256sum "$output" > "$output.sha256"
+
+      - name: Upload compiled server
+        uses: actions/upload-artifact@v4
+        with:
+          name: frida-server-17.24.3-public-patches-android-x86_64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
